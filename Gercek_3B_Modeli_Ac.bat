@@ -6,14 +6,14 @@ echo ========================================================
 echo.
 echo (Tarayici otomatik olarak acilacaktir, bu siyah ekrani KAPATMAYIN!)
 
-:: Start a local server at the current root directory
-start "Local Server" /B python -m http.server 8000
+:: Start a local server at the current root directory on port 8888
+start "Local Server" /B python -m http.server 8888
 
 :: Wait 2 seconds for the server to start
 timeout /t 2 /nobreak > NUL
 
 :: Open the browser to the HTML file
-start http://localhost:8000/01_WebODM_YKNsiz_Python/Sonuclar/Gercek_3B_Model.html
+start http://localhost:8888/01_WebODM_YKNsiz_Python/Sonuclar/Gercek_3B_Model.html
 
 echo.
 echo Tarayici acildi. Isiniz bittiginde bu pencereyi kapatabilirsiniz.
