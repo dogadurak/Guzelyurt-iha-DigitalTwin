@@ -13,8 +13,11 @@ if 'Net_Yukseklik' in gdf.columns:
 else:
     gdf['Net_Yukseklik'] = 10
 
-if 'Gunes_Uretimi_kWh' in gdf.columns:
-    gdf['Gunes_Uretimi_kWh'] = gdf['Gunes_Uretimi_kWh'].fillna(0)
+if 'Yillik_Uretim_kWh' in gdf.columns:
+    gdf['Yillik_Uretim_kWh'] = gdf['Yillik_Uretim_kWh'].fillna(0)
+
+# Çatı Alanını EPSG:32636 (Metre) cinsinden hesaplayıp ekle (Tooltip için)
+gdf['Alan_m2'] = gdf.to_crs(epsg=32636).area.round(1)
 
 # 2. PyDeck için uygun formata (JSON) dönüştür
 # PyDeck, doğrudan geopandas verilerini alabilir, ama koordinat sisteminin EPSG:4326 (WGS84 Enlem/Boylam) olması gerekir!
@@ -27,13 +30,13 @@ center_lat = gdf.geometry.centroid.y.mean()
 
 # Renklendirme mantığı (Güneş potansiyeline göre renk verelim: Yeşil=İyi, Sarı=Orta, Kırmızı=Düşük)
 def get_color(row):
-    potansiyel = row.get('Gunes_Uretimi_kWh', 0)
+    potansiyel = row.get('Yillik_Uretim_kWh', 0)
     if potansiyel > 50000:
-        return [0, 255, 0, 200]  # Yeşil (Çok iyi)
+        return [0, 255, 0, 220]  # Yeşil (Çok iyi)
     elif potansiyel > 20000:
-        return [255, 255, 0, 200] # Sarı (Orta)
+        return [255, 255, 0, 220] # Sarı (Orta)
     else:
-        return [255, 0, 0, 200]   # Kırmızı (Düşük)
+        return [255, 0, 0, 220]   # Kırmızı (Düşük)
 
 gdf['fill_color'] = gdf.apply(get_color, axis=1)
 
@@ -42,14 +45,14 @@ print("[BİLGİ] 3B Şehir Modeli Katmanı oluşturuluyor...")
 layer = pdk.Layer(
     "GeoJsonLayer",
     gdf,
-    opacity=0.8,
-    stroked=False,
+    opacity=0.9,
+    stroked=True,
     filled=True,
     extruded=True, # 3 BOYUTLU YAP!
-    wireframe=True,
-    get_elevation="Net_Yukseklik * 1.5", # Görsel olarak biraz abartabiliriz daha iyi görünmesi için
+    wireframe=False, # Daha temiz kutu görünümü için
+    get_elevation="Net_Yukseklik", # Akademik doğruluk için 1:1 gerçek yükseklik
     get_fill_color="fill_color",
-    get_line_color=[255, 255, 255],
+    get_line_color=[100, 100, 100],
     pickable=True, # Tıklanabilir olsun
 )
 
@@ -68,8 +71,8 @@ tooltip = {
     "html": "<b>Bina ID:</b> {Bina_ID}<br/>"
             "<b>Çatı Alanı:</b> {Alan_m2} m²<br/>"
             "<b>Yükseklik:</b> {Net_Yukseklik} m<br/>"
-            "<b>Yıllık Güneş Potansiyeli:</b> {Gunes_Uretimi_kWh} kWh",
-    "style": {"background": "grey", "color": "white", "font-family": '"Helvetica Neue", Arial', "z-index": "10000"}
+            "<b>Yıllık Güneş Potansiyeli:</b> {Yillik_Uretim_kWh} kWh",
+    "style": {"background": "rgba(50,50,50,0.9)", "color": "white", "font-family": '"Helvetica Neue", Arial', "z-index": "10000"}
 }
 
 r = pdk.Deck(
