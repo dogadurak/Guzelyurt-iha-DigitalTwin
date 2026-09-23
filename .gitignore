@@ -1,0 +1,17 @@
+# Büyük veri dosyalarını (Görüntüler, Ziplar, TIF'ler vb.) GitHub'a yüklememek için Gitignore
+
+# Görüntü Klasörleri
+GuzelyurtIHA_DATA/
+WebODM/
+WebODM_Outputs/
+
+# Büyük Sıkıştırılmış ve İmaj Dosyaları
+*.rar
+*.zip
+*.tif
+*.tiff
+*.exe
+
+# Python Cache
+__pycache__/
+*.pyc
