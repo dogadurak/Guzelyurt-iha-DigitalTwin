@@ -3,7 +3,7 @@ import pydeck as pdk
 import geopandas as gpd
 
 # 1. GeoJSON Dosyasını Oku
-geojson_path = "Binalar_Gunes_Potansiyeli.geojson"
+geojson_path = r"../Sonuclar/Binalar_Gunes_Potansiyeli.geojson"
 print(f"[BİLGİ] {geojson_path} dosyası okunuyor...")
 gdf = gpd.read_file(geojson_path)
 
@@ -79,5 +79,5 @@ r = pdk.Deck(
     map_style='light' # Arkada açık renkli bir harita altlığı
 )
 
-r.to_html("Guzelyurt_3B_Sehir_Modeli.html")
-print("[BAŞARILI] Harita başarıyla oluşturuldu! Lütfen klasördeki 'Guzelyurt_3B_Sehir_Modeli.html' dosyasına çift tıklayıp açın.")
+r.to_html(r"../Sonuclar/Guzelyurt_3B_Sehir_Modeli.html")
+print("[BAŞARILI] Harita başarıyla oluşturuldu! Lütfen 'Sonuclar/Guzelyurt_3B_Sehir_Modeli.html' dosyasına çift tıklayıp açın.")

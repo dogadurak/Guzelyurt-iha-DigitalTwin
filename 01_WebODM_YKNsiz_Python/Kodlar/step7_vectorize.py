@@ -1,129 +1,142 @@
 import os
-import cv2
 import numpy as np
+import rasterio
+import cv2
 import geopandas as gpd
 from shapely.geometry import Polygon
-import rasterio
 from rasterstats import zonal_stats
-from rasterio.features import shapes
-import warnings
 
-# Uyarıları gizle
-warnings.filterwarnings("ignore")
+# 1. Dosya Yolları
+dsm_path = r"../../WebODM_Outputs/Extracted/odm_dem/dsm.tif"
+output_geojson = r"../Sonuclar/Binalar_Gunes_Potansiyeli.geojson"
 
-def detect_buildings_from_ortho_and_dsm(ortho_path, dsm_path):
-    print("--- 7. Sayısallaştırma ve Bina Tespiti ---")
-    print(f"Ortofoto yükleniyor: {ortho_path}")
-    print(f"Yükseklik Modeli (DSM) yükleniyor: {dsm_path}")
+os.makedirs(os.path.dirname(output_geojson), exist_ok=True)
+
+scale_factor = 0.1 # 10 kat küçült (~2500x2000 px)
+
+print("[BİLGİ] DSM okunuyor (Hızlı bellek yönetimi ile düşük çözünürlükte)...")
+with rasterio.open(dsm_path) as src:
+    small_w = int(src.width * scale_factor)
+    small_h = int(src.height * scale_factor)
     
-    # Gerçek veri yolları mevcut mu kontrol et
-    if not os.path.exists(ortho_path) or not os.path.exists(dsm_path):
-        print("[UYARI] Gerçek WebODM çıktıları bulunamadı. Şimdilik sentetik/örnek analiz modu çalıştırılıyor...")
-        return generate_synthetic_solar_data()
+    # Rasterio ile okurken doğrudan küçült (RAM'i şişirmez)
+    dsm_small = src.read(
+        1,
+        out_shape=(small_h, small_w),
+        resampling=rasterio.enums.Resampling.average
+    )
+    
+    # Transform matrisini de ölçekle
+    transform_small = src.transform * src.transform.scale(
+        (src.width / dsm_small.shape[1]),
+        (src.height / dsm_small.shape[0])
+    )
+    
+    crs = src.crs
+    nodata = src.nodata
 
-    # 1. DSM (Yükseklik) üzerinden Binaları Çıkartma
-    # Mantık: DSM üzerindeki keskin yükseklik farkları (zemin vs çatı) binaları verir.
-    with rasterio.open(dsm_path) as src_dsm:
-        dsm_data = src_dsm.read(1)
-        transform = src_dsm.transform
-        crs = src_dsm.crs
+# Nodata maskelemesi
+if nodata is not None:
+    mask = (dsm_small == nodata) | np.isnan(dsm_small)
+else:
+    mask = np.isnan(dsm_small)
+
+dsm_clean = np.where(mask, np.nanmin(dsm_small), dsm_small)
+
+print("[BİLGİ] DTM hesaplanıyor (Morfolojik Açılış)...")
+# UZAKTAN ALGILAMA DÜZELTMESİ:
+# GSD (Örnekleme Aralığı) şu an ~60 cm (0.6 m). 
+# Binaları (max 50mx50m) DTM'den silebilmek için kernel boyutu binadan büyük olmalıdır!
+# 50m / 0.6m = 83 piksel. Kernel'i (85, 85) yapıyoruz.
+kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (85, 85))
+dtm_small = cv2.morphologyEx(dsm_clean, cv2.MORPH_OPEN, kernel)
+
+print("[BİLGİ] Yükseklik farkı hesaplanıyor...")
+z_diff = dsm_clean - dtm_small
+
+print("[BİLGİ] Yükseklik maskesi (3m - 25m) oluşturuluyor...")
+# Binaları tespit etmek için 3 metre ile 25 metre arası
+bina_maskesi = (z_diff > 3.0) & (z_diff < 25.0)
+bina_maskesi = bina_maskesi.astype(np.uint8) * 255
+
+print("[BİLGİ] Gürültüler filtreleniyor...")
+# Temizlik
+small_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+bina_maskesi = cv2.morphologyEx(bina_maskesi, cv2.MORPH_OPEN, small_kernel)
+
+print("[BİLGİ] Konturlar (Bina Siluetleri) bulunuyor...")
+contours, hierarchy = cv2.findContours(bina_maskesi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+polygons = []
+for cnt in contours:
+    # Konturu basitleştir
+    epsilon = 0.01 * cv2.arcLength(cnt, True)
+    approx = cv2.approxPolyDP(cnt, epsilon, True)
+    
+    area = cv2.contourArea(approx)
+    # Alan hesabını piksel cinsinden yapıyoruz (küçültülmüş pikseller).
+    # Küçültülmüş resimde GSD ~ 60cm = 0.6m. 1 piksel = 0.36m2
+    # 50m2 = ~140 piksel, 1000m2 = ~2700 piksel
+    if 100 < area < 5000 and len(approx) >= 3:
+        geo_coords = []
+        for point in approx:
+            x, y = point[0]
+            # Küçültülmüş transform matrisini kullanarak koordinata çevir
+            geo_x, geo_y = rasterio.transform.xy(transform_small, y, x)
+            geo_coords.append((geo_x, geo_y))
         
-        # Geçersiz verileri (NoData) filtrele
-        nodata = src_dsm.nodata
-        if nodata is not None:
-            dsm_data = np.where(dsm_data == nodata, np.nan, dsm_data)
-
-    # Basit bir eşikleme (Threshold) ile yerden 3 metre ve daha yüksek olan yapıları bina kabul edelim
-    # (Örnek olarak zeminin minimum kotuna göre hesaplıyoruz)
-    zemin_kotu = np.nanpercentile(dsm_data, 5) # En düşük %5'lik dilim genelde zemindir
-    bina_maskesi = (dsm_data > (zemin_kotu + 3.0)).astype(np.uint8)
-
-    print(f"Zemin kotu tahmini: {zemin_kotu:.2f} metre. Zemin +3m üzerindeki alanlar bina olarak maskelendi.")
-
-    # OpenCV ile maskeyi temizleme (Gürültüleri/Ağaçları elemek için morfolojik işlemler)
-    kernel = np.ones((5, 5), np.uint8)
-    bina_maskesi_temiz = cv2.morphologyEx(bina_maskesi, cv2.MORPH_OPEN, kernel) # Küçük noktaları sil
-    bina_maskesi_temiz = cv2.morphologyEx(bina_maskesi_temiz, cv2.MORPH_CLOSE, kernel) # Çatıdaki boşlukları doldur
-
-    # 2. Vektörizasyon (Raster Maskeyi Poligonlara Çevirme)
-    print("Vektörizasyon yapılıyor (Poligonlar oluşturuluyor)...")
-    polygons = []
-    
-    for geom, value in shapes(bina_maskesi_temiz, mask=(bina_maskesi_temiz==1), transform=transform):
-        poly = Polygon(geom["coordinates"][0])
-        # Çok küçük poligonları (örn: arabalar, ağaçlar) eleyelim (Alan < 30 metrekare)
-        if poly.area > 30:
+        geo_coords.append(geo_coords[0])
+        poly = Polygon(geo_coords)
+        if poly.is_valid:
             polygons.append(poly)
-            
-    print(f"Toplam {len(polygons)} adet potansiyel bina çatısı tespit edildi.")
 
-    # GeoDataFrame oluştur
-    gdf = gpd.GeoDataFrame({'Bina_ID': range(1, len(polygons) + 1)}, geometry=polygons, crs=crs)
+print(f"[BİLGİ] {len(polygons)} adet potansiyel bina tespit edildi.")
 
-    # 3. Yükseklik Ataması (Zonal Statistics)
-    print("Zonal Statistics ile Çatı Yükseklikleri Hesaplanıyor...")
-    dsm_stats = zonal_stats(gdf, dsm_data, affine=transform, stats=['mean', 'max'], nodata=np.nan)
+if len(polygons) == 0:
+    print("[HATA] Hiç bina bulunamadı! Eşik değerlerini veya alan hesabını kontrol edin.")
+    exit(1)
+
+gdf_binalar = gpd.GeoDataFrame(geometry=polygons, crs=crs)
+
+print("[BİLGİ] Yükseklik ve Güneş Potansiyeli Hesaplanıyor...")
+zonal_stats_result = zonal_stats(
+    gdf_binalar, 
+    dsm_path, 
+    stats=['min', 'mean'],
+    nodata=nodata
+)
+
+bina_id = []
+yukseklikler = []
+paneller = []
+kapasiteler = []
+
+for idx, stat in enumerate(zonal_stats_result):
+    h_min = stat['min'] if stat['min'] is not None else 0
+    h_mean = stat['mean'] if stat['mean'] is not None else 0
     
-    gdf['Zemin_Kot'] = zemin_kotu
-    gdf['Cati_Ort_Kot'] = [stat['mean'] for stat in dsm_stats]
-    gdf['Net_Yukseklik'] = gdf['Cati_Ort_Kot'] - gdf['Zemin_Kot']
-
-    # 4. Güneş Paneli Potansiyeli Hesaplama
-    calculate_solar_potential(gdf)
-
-    return gdf
-
-def generate_synthetic_solar_data():
-    """Gerçek veri henüz yoksa sistemi test etmek için sahte/sentetik veri üretir."""
-    print("Sentetik (Test) verisi ile Güneş Paneli Potansiyeli hesaplanıyor...")
-    poly1 = Polygon([(619147, 4239226), (619157, 4239226), (619157, 4239216), (619147, 4239216)])
-    poly2 = Polygon([(619160, 4239200), (619180, 4239200), (619180, 4239190), (619160, 4239190)])
+    net_h = h_mean - h_min
+    if net_h < 3.0: 
+        net_h = 3.0 
     
-    gdf = gpd.GeoDataFrame({'Bina_ID': [1, 2]}, geometry=[poly1, poly2], crs="EPSG:32636")
-    gdf['Zemin_Kot'] = [1450.0, 1450.0]
-    gdf['Cati_Ort_Kot'] = [1462.5, 1458.0]
-    gdf['Net_Yukseklik'] = gdf['Cati_Ort_Kot'] - gdf['Zemin_Kot']
+    bina_alani = gdf_binalar.geometry.iloc[idx].area
+    kullanilabilir_alan = bina_alani * 0.70
+    panel_sayisi = int(kullanilabilir_alan / 1.6)
+    kurulu_guc_kwp = panel_sayisi * 0.35
+    yillik_uretim_kwh = kurulu_guc_kwp * 1500
     
-    calculate_solar_potential(gdf)
-    return gdf
+    bina_id.append(f"Bina_{idx+1}")
+    yukseklikler.append(round(net_h, 2))
+    paneller.append(panel_sayisi)
+    kapasiteler.append(round(yillik_uretim_kwh, 2))
 
-def calculate_solar_potential(gdf):
-    print("--- Güneş Paneli Potansiyeli Hesaplanıyor ---")
-    
-    # Güzelyurt ortalama yıllık güneşlenme baz alınmıştır
-    # 1 m2 panel ortalama 330W (0.33 kW) güç üretir.
-    PANEL_ALANI = 1.6 # m2
-    PANEL_GUCU = 0.33 # kW
-    KULLANILABILIR_CATI_ORANI = 0.70 # Çatının %70'ine panel döşenebilir (bacalar, kenar boşlukları)
-    YILLIK_GUNES_SAATI = 1600 # Güzelyurt bölgesi için tahmini saat
-    SISTEM_VERIMLILIGI = 0.80 # İnvertör, kablo, sıcaklık kayıpları sonrası verim
+gdf_binalar['Bina_ID'] = bina_id
+gdf_binalar['Net_Yukseklik'] = yukseklikler
+gdf_binalar['Gunes_Paneli_Sayisi'] = paneller
+gdf_binalar['Yillik_Uretim_kWh'] = kapasiteler
 
-    # Hesaplamalar
-    gdf['Cati_Alani_m2'] = gdf.area
-    gdf['Kullanilabilir_Alan_m2'] = gdf['Cati_Alani_m2'] * KULLANILABILIR_CATI_ORANI
-    
-    # Kaç panel sığar?
-    gdf['Maks_Panel_Sayisi'] = np.floor(gdf['Kullanilabilir_Alan_m2'] / PANEL_ALANI)
-    
-    # Kurulu Güç (kWp)
-    gdf['Kurulu_Guc_kWp'] = gdf['Maks_Panel_Sayisi'] * PANEL_GUCU
-    
-    # Yıllık Enerji Üretimi (kWh/Yıl)
-    # Formül: Kurulu Güç * Yıllık Güneşlenme * Verimlilik
-    gdf['Yillik_Uretim_kWh'] = gdf['Kurulu_Guc_kWp'] * YILLIK_GUNES_SAATI * SISTEM_VERIMLILIGI
+gdf_binalar = gdf_binalar.to_crs(epsg=4326)
 
-    print(f"Toplam tespit edilen çatı alanı: {gdf['Cati_Alani_m2'].sum():.2f} m2")
-    print(f"Bölgedeki binaların Yıllık Toplam Güneş Enerjisi Üretim Potansiyeli: {gdf['Yillik_Uretim_kWh'].sum():.2f} kWh/Yıl")
-
-    # Çıktıyı kaydet
-    out_file = r"C:\Users\PC\Desktop\mügehoca_digitalphoto_3Bcitymodelling\Binalar_Gunes_Potansiyeli.geojson"
-    gdf.to_file(out_file, driver='GeoJSON')
-    print(f"Güneş Paneli Analiz Sonuçları GeoJSON olarak kaydedildi: {out_file}")
-
-if __name__ == "__main__":
-    # WebODM işlemi bittiğinde oluşacak gerçek dosya yolları:
-    orto_path = r"C:\Users\PC\Desktop\mügehoca_digitalphoto_3Bcitymodelling\WebODM_Outputs\odm_orthophoto.tif"
-    dsm_path = r"C:\Users\PC\Desktop\mügehoca_digitalphoto_3Bcitymodelling\WebODM_Outputs\dsm.tif"
-    
-    result_gdf = detect_buildings_from_ortho_and_dsm(orto_path, dsm_path)
-    print("İşlem Başarıyla Tamamlandı!")
+print(f"[BİLGİ] GeoJSON kaydediliyor: {output_geojson}")
+gdf_binalar.to_file(output_geojson, driver='GeoJSON')
+print("[BAŞARILI] İşlem tamamlandı!")
